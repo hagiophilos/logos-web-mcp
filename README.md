@@ -102,14 +102,23 @@ claude mcp add logos-web -- node /ruta/absoluta/a/logos-web-mcp/src/index.mjs
 
 ---
 
-## Herramientas MCP incluidas
+## Herramientas y metodología de investigación en 4 pasos
+
+El servidor incluye instrucciones de protocolo y el prompt `logos_investigar` para que Gemini y Claude sigan automáticamente un flujo académico de 4 pasos ante cualquier pregunta bíblica, teológica o homilética:
+
+1. **Entender la pregunta:** Desglosa el tema en términos clave bilingües (español e inglés).
+2. **Evaluar los recursos más apropiados:** Prioriza comentarios, diccionarios, manuales de hermenéutica/homilética y monografías de tu biblioteca licenciada.
+3. **Colectar la información y citas:** Extrae el contexto expandido alrededor de cada pasaje y genera citas bibliográficas oficiales directamente desde el motor de Logos (`/api/app/resources/citation/render`).
+4. **Entregar síntesis citada con referencias:** Combina explicación redactada con ejemplos concretos, citas numeradas inline (`[\[1\]](https://ref.ly/logosres/...)`), referencias bíblicas enlazadas y bibliografía completa con enlaces directos al rango exacto (`app.logos.com/.../textranges/...`).
 
 | Herramienta | Qué hace |
 | :--- | :--- |
+| `logos_research_topic` | Orquesta el flujo de investigación de 4 pasos: ejecuta múltiples consultas bilingües, evalúa y diversifica libros licenciados, extrae ventanas de contexto alrededor de cada hallazgo y genera citas bibliográficas oficiales `[1]..[N]` listas para citar (`mode: "precise"` por defecto, sin gastar créditos de IA). |
+| `logos_render_citations` | Genera citas bibliográficas académicas oficiales de Logos (`sbl-v2`, `turabian-author-date`, etc.) con enlaces `ref.ly` y `textranges` para uno o varios pasajes. |
 | `logos_status` | Verifica la sesión activa en `app.logos.com`, muestra el ID de usuario, formato de cita, total de libros licenciados y muestra del catálogo. |
 | `logos_list_books` | Lista y filtra libros licenciados en tu biblioteca (`lang:es`, `type:bible`, `type:commentary`, `author:...`) y puede devolver ficha bibliográfica e índice (`tableofcontents`). |
-| `logos_search_library` | Busca dentro de tus libros (`scope: "books"`) o Biblias (`scope: "bible"`). Devuelve fragmentos resaltados, `displayReference`, `articleId`, `offset` y enlace directo `https://app.logos.com/...`. Usa `mode: "precise"` por defecto (sin consumir créditos de IA). |
-| `logos_read_resource` | Lee el texto íntegro y formateado de un capítulo, artículo, página (`page.520`), versículo (`bible.66.3.25`), entrada de diccionario (`headword`) u `offset`, incluyendo `[Page N]`, referencias bíblicas y `previousArticleId` / `nextArticleId`. |
+| `logos_search_library` | Busca dentro de tus libros (`scope: "books"`) o Biblias (`scope: "bible"`). Devuelve fragmentos resaltados, `displayReference`, `articleId`, `offset` y enlaces `app.logos.com` y `ref.ly`. Usa `mode: "precise"` por defecto (sin consumir créditos de IA). |
+| `logos_read_resource` | Lee el texto íntegro (o una ventana `contextChars` centrada en `offset`) de un capítulo, artículo, página (`page.520`), versículo (`bible.66.3.25`), entrada de diccionario (`headword`) u `offset`, incluyendo `[Page N]`, referencias bíblicas y `previousArticleId` / `nextArticleId`. |
 | `logos_sync_session` | Renueva `~/.logos-web-mcp/session.json` vía navegador (CDP) o pasando `cookieHeader`. |
 
 ---

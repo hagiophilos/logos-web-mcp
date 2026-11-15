@@ -129,14 +129,114 @@ function wrapInlineMarkdown(inner, marker) {
 }
 
 /**
+ * Injects an internal anchor sentinel at the offset-marker closest to targetOffset.
+ */
+const TARGET_ANCHOR_SENTINEL = '@@LOGOS_OFFSET_ANCHOR@@';
+
+function injectOffsetAnchor(html, targetOffset) {
+  if (targetOffset === undefined || targetOffset === null || Number.isNaN(Number(targetOffset))) {
+    return html;
+  }
+  const target = Number(targetOffset);
+  const markers = [];
+  const markerRe = /<span\b([^>]*)>\s*<\/span>/gi;
+  let match;
+  while ((match = markerRe.exec(html)) !== null) {
+    const attrs = match[1] || '';
+    const cls = getAttr(attrs, 'class') || '';
+    const rawOff = getAttr(attrs, 'data-offset');
+    if (cls.includes('offset-marker') && rawOff !== null && /^\d+$/.test(rawOff)) {
+      markers.push({ index: match.index, end: markerRe.lastIndex, offset: Number(rawOff) });
+    }
+  }
+  if (markers.length === 0) return html;
+
+  let best = markers[0];
+  let bestDist = Infinity;
+  for (const m of markers) {
+    // Prefer the last marker at or just before target, otherwise nearest overall
+    const dist = m.offset <= target ? target - m.offset : (m.offset - target) * 2 + 10000;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = m;
+    }
+  }
+
+  return `${html.slice(0, best.index)}${TARGET_ANCHOR_SENTINEL}${html.slice(best.end)}`;
+}
+
+/**
+ * Extracts a readable window centered near TARGET_ANCHOR_SENTINEL and prepends nearest page milestone.
+ */
+function extractWindowAroundAnchor(text, windowChars) {
+  const anchorIdx = text.indexOf(TARGET_ANCHOR_SENTINEL);
+  const cleanAll = text.replace(TARGET_ANCHOR_SENTINEL, '');
+  if (cleanAll.length <= windowChars || anchorIdx === -1) {
+    const truncated = windowChars > 0 && cleanAll.length > windowChars;
+    return {
+      text: truncated
+        ? `${cleanAll.slice(0, windowChars)}\n\n[... Texto truncado a ${windowChars} caracteres de ${cleanAll.length} totales ...]`
+        : cleanAll,
+      truncated,
+      totalChars: cleanAll.length,
+    };
+  }
+
+  const beforeTarget = Math.floor(windowChars * 0.25);
+  let start = Math.max(0, anchorIdx - beforeTarget);
+  let end = Math.min(cleanAll.length, start + windowChars);
+  if (end === cleanAll.length) {
+    start = Math.max(0, end - windowChars);
+  }
+
+  if (start > 0) {
+    const boundary = cleanAll.slice(start, Math.min(cleanAll.length, start + 120)).search(/\n\n|\s/);
+    if (boundary > 0) start += boundary + 1;
+  }
+  if (end < cleanAll.length) {
+    const tailSlice = cleanAll.slice(Math.max(0, end - 120), end);
+    const lastBreak = Math.max(tailSlice.lastIndexOf('. '), tailSlice.lastIndexOf('\n'));
+    if (lastBreak > 20) end = Math.max(0, end - 120) + lastBreak + 1;
+  }
+
+  let excerpt = cleanAll.slice(start, end).trim();
+  // Prepend nearest earlier [Page N] milestone if missing from start of window
+  if (start > 0 && !/^\[Page\s+\d+\]/i.test(excerpt)) {
+    const priorPages = [...cleanAll.slice(0, start).matchAll(/\[Page\s+[^\]]+\]/gi)];
+    if (priorPages.length > 0) {
+      excerpt = `${priorPages[priorPages.length - 1][0]} ... ${excerpt}`;
+    } else {
+      excerpt = `... ${excerpt}`;
+    }
+  }
+  if (end < cleanAll.length) {
+    excerpt = `${excerpt} ...`;
+  }
+
+  return {
+    text: excerpt,
+    truncated: true,
+    totalChars: cleanAll.length,
+  };
+}
+
+/**
  * Converts Logos resource HTML (<div class="resourcetext">...</div>) into clean structured text/markdown.
  */
-export function cleanArticleHtml(html, maxChars = 15000) {
+export function cleanArticleHtml(html, maxCharsOrOptions = 15000) {
   if (!html || typeof html !== 'string') {
     return { text: '', truncated: false, totalChars: 0 };
   }
 
-  let working = html
+  const opts =
+    typeof maxCharsOrOptions === 'number'
+      ? { maxChars: maxCharsOrOptions }
+      : maxCharsOrOptions || {};
+  const maxChars = opts.maxChars ?? 15000;
+  const contextChars = opts.contextChars ?? 0;
+  const linkBibleRefs = Boolean(opts.linkBibleRefs);
+
+  let working = injectOffsetAnchor(html, opts.targetOffset)
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<span[^>]*class=["'][^"']*offset-marker[^"']*["'][^>]*>\s*<\/span>/gi, '');
@@ -159,7 +259,9 @@ export function cleanArticleHtml(html, maxChars = 15000) {
     }
 
     if (className.includes('bibleref') && dataRef && cleanInner) {
-      return `${cleanInner} (${dataRef})`;
+      return linkBibleRefs
+        ? `[${cleanInner}](${buildBibleReferenceUrl(dataRef)})`
+        : `${cleanInner} (${dataRef})`;
     }
 
     return inner;
@@ -191,16 +293,60 @@ export function cleanArticleHtml(html, maxChars = 15000) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  const totalChars = normalized.length;
+  if (contextChars > 0) {
+    return extractWindowAroundAnchor(normalized, contextChars);
+  }
+
+  const cleanNormalized = normalized.replace(TARGET_ANCHOR_SENTINEL, '');
+  const totalChars = cleanNormalized.length;
   if (maxChars > 0 && totalChars > maxChars) {
     return {
-      text: `${normalized.slice(0, maxChars)}\n\n[... Texto truncado a ${maxChars} caracteres de ${totalChars} totales ...]`,
+      text: `${cleanNormalized.slice(0, maxChars)}\n\n[... Texto truncado a ${maxChars} caracteres de ${totalChars} totales ...]`,
       truncated: true,
       totalChars,
     };
   }
 
-  return { text: normalized, truncated: false, totalChars };
+  return { text: cleanNormalized, truncated: false, totalChars };
+}
+
+/**
+ * Builds a Logos ref.ly citation link (matching Study Assistant inline [1] links).
+ */
+export function buildReflyUrl({ resourceId, resourceVersion, offset }) {
+  if (!resourceId) return LOGOS_ORIGIN;
+  if (resourceVersion && offset !== undefined && offset !== null) {
+    const pos = `res/${resourceId}/${resourceVersion}/${offset}`;
+    return `https://ref.ly/logosres/${resourceId}?pos=${encodeURIComponent(pos)}`;
+  }
+  return buildLogosWebUrl({ resourceId, offset });
+}
+
+/**
+ * Builds a Logos Web textrange URL highlighting the cited passage in app.logos.com.
+ */
+export function buildTextRangeUrl({ resourceId, resourceVersion, offset, length = 300 }) {
+  if (!resourceId) return LOGOS_ORIGIN;
+  if (resourceVersion && offset !== undefined && offset !== null) {
+    const encId = encodeURIComponent(resourceId);
+    const payload = JSON.stringify([
+      {
+        resourceId,
+        resourceVersion,
+        offset,
+        length: Math.max(1, Number(length) || 300),
+      },
+    ]);
+    return `${LOGOS_ORIGIN}/books/${encId}/offsets/${encodeURIComponent(String(offset))}/textranges/${encodeURIComponent(payload)}`;
+  }
+  return buildLogosWebUrl({ resourceId, offset });
+}
+
+/**
+ * Builds a direct Bible or data-type reference URL in app.logos.com.
+ */
+export function buildBibleReferenceUrl(rawReference) {
+  return `${LOGOS_ORIGIN}/references/${encodeURIComponent(String(rawReference))}`;
 }
 
 /**
@@ -533,6 +679,17 @@ export async function searchLibrary({
         articleId: r.article?.name,
         reference: referenceRaw,
       }),
+      reflyUrl: buildReflyUrl({
+        resourceId: r.resourceId,
+        resourceVersion: r.resourceVersion,
+        offset: r.offset,
+      }),
+      textRangeUrl: buildTextRangeUrl({
+        resourceId: r.resourceId,
+        resourceVersion: r.resourceVersion,
+        offset: r.offset,
+        length: r.length || 300,
+      }),
     };
   });
 
@@ -560,6 +717,8 @@ export async function readResource({
   includeToc = false,
   parentTocId,
   maxChars = 15000,
+  contextChars = 0,
+  linkBibleRefs = false,
 } = {}) {
   if (!resourceId || !resourceId.trim()) {
     throw new Error('El parámetro "resourceId" es obligatorio (ejemplo: "LLS:STBERKHOF").');
@@ -645,6 +804,7 @@ export async function readResource({
       previousArticleId: null,
       nextArticleId: null,
       webUrl: buildLogosWebUrl({ resourceId: resolvedResourceId, reference, headword }),
+      reflyUrl: null,
       truncated,
       totalChars: previewFallbackText.length,
       text: truncated ? previewFallbackText.slice(0, maxChars) : previewFallbackText,
@@ -653,15 +813,22 @@ export async function readResource({
     };
   }
 
-  const parsedHtml = cleanArticleHtml(articleData?.article?.content || '', maxChars);
+  const parsedHtml = cleanArticleHtml(articleData?.article?.content || '', {
+    maxChars,
+    targetOffset: offset,
+    contextChars,
+    linkBibleRefs,
+  });
   const resolvedArticleId = articleData?.article?.articleId || articleId || null;
-  const resolvedOffset = articleData?.article?.indexedOffset ?? offset ?? null;
+  const resolvedOffset = offset ?? articleData?.article?.indexedOffset ?? null;
+  const finalResourceId = articleData?.resourceId || resourceId;
+  const finalVersion = articleData?.resourceVersion || null;
 
   return {
-    resourceId: articleData?.resourceId || resourceId,
+    resourceId: finalResourceId,
     resourceTitle: articleData?.resourceTitle || info?.title || resourceId,
     abbreviatedTitle: articleData?.abbreviatedTitle || info?.abbreviatedTitle || null,
-    resourceVersion: articleData?.resourceVersion || null,
+    resourceVersion: finalVersion,
     articleId: resolvedArticleId,
     indexedOffset: resolvedOffset,
     indexedLength: articleData?.article?.indexedLength ?? null,
@@ -669,16 +836,403 @@ export async function readResource({
     previousArticleId: articleData?.previousArticleId || null,
     nextArticleId: articleData?.nextArticleId || null,
     webUrl: buildLogosWebUrl({
-      resourceId: articleData?.resourceId || resourceId,
+      resourceId: finalResourceId,
       offset: resolvedOffset,
       articleId: resolvedArticleId,
       reference,
       headword,
+    }),
+    reflyUrl: buildReflyUrl({
+      resourceId: finalResourceId,
+      resourceVersion: finalVersion,
+      offset: resolvedOffset,
     }),
     truncated: parsedHtml.truncated,
     totalChars: parsedHtml.totalChars,
     text: parsedHtml.text,
     info,
     tableOfContents,
+  };
+}
+
+/**
+ * Formats rendered Logos citation HTML/plainText into Logos Study Assistant Markdown style
+ * with hyperlinked chapter/book title and trailing page/volume locator.
+ */
+function parseCitationParts({ html, plainText, textRangeUrl }) {
+  const cleanPlain = (plainText || '').trim();
+  if (!cleanPlain) {
+    return { baseBody: '', locator: null, locatorUrl: textRangeUrl, markdownFootnote: '' };
+  }
+
+  let bodyWithoutLocator = cleanPlain.replace(/\.$/, '');
+  let locator = null;
+  let locatorSeparator = ', ';
+  const commaLocMatch = cleanPlain.match(/,\s*([^,()]+?)\.?$/);
+  const parenLocMatch = cleanPlain.match(/\)\s+(\d+(?::\d+)?(?:[–-]\d+(?::\d+)?)?)\.?$/);
+
+  if (commaLocMatch && /\d/.test(commaLocMatch[1]) && !commaLocMatch[1].trim().endsWith(')')) {
+    locator = commaLocMatch[1].trim();
+    bodyWithoutLocator = cleanPlain.slice(0, commaLocMatch.index).trim();
+    locatorSeparator = ', ';
+  } else if (parenLocMatch) {
+    locator = parenLocMatch[1].trim();
+    bodyWithoutLocator = cleanPlain.slice(0, parenLocMatch.index + 1).trim();
+    locatorSeparator = ' ';
+  }
+
+  const escapeLabel = (s) => s.replace(/[[\]]/g, '\\$&');
+  let linkedBody = bodyWithoutLocator;
+
+  // Prefer linking a quoted article/chapter title when present, else link the first italicized book title
+  const quotedMatch = bodyWithoutLocator.match(/“([^”]+)”/);
+  if (quotedMatch) {
+    linkedBody = bodyWithoutLocator.replace(
+      quotedMatch[0],
+      () => `“[${escapeLabel(quotedMatch[1])}](${textRangeUrl})”`
+    );
+  } else if (html) {
+    const italicMatch = html.match(/<span[^>]*font-style:\s*italic[^>]*>([\s\S]*?)<\/span>/i);
+    const bookTitle = italicMatch
+      ? decodeEntities(italicMatch[1].replace(/<[^>]+>/g, '')).trim()
+      : null;
+    if (bookTitle && bodyWithoutLocator.includes(bookTitle)) {
+      linkedBody = bodyWithoutLocator.replace(
+        bookTitle,
+        () => `[${escapeLabel(bookTitle)}](${textRangeUrl})`
+      );
+    }
+  }
+
+  const markdownFootnote = locator
+    ? `${linkedBody}${locatorSeparator}[${locator}](${textRangeUrl}).`
+    : `${linkedBody}.`;
+
+  return {
+    baseBody: linkedBody,
+    locatorSeparator,
+    locator,
+    locatorUrl: textRangeUrl,
+    markdownFootnote,
+  };
+}
+
+/**
+ * Fetches the user's preferred Logos citation format (default "sbl-v2").
+ */
+async function resolveCitationFormat(formatName) {
+  if (formatName) return formatName;
+  try {
+    const pref = await logosRequest('/api/app/user/getpreferences', {
+      method: 'POST',
+      body: { keys: ['LogosDesktop/CurrentCitationFormat'] },
+    });
+    const entry = Array.isArray(pref.data) ? pref.data[0] : null;
+    return entry?.val || 'sbl-v2';
+  } catch {
+    return 'sbl-v2';
+  }
+}
+
+/**
+ * Renders official academic citations via /api/app/resources/citation/render for one or more text ranges.
+ */
+export async function renderCitationsBatch({ items = [], formatName } = {}) {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('Debes indicar al menos un elemento en "items" con resourceId y offset.');
+  }
+  const resolvedFormat = await resolveCitationFormat(formatName);
+
+  const rendered = await Promise.all(
+    items.map(async (item) => {
+      const resourceId = item.resourceId;
+      let resourceVersion = item.resourceVersion;
+      const offset = item.offset;
+      const length = Math.min(Math.max(1, Number(item.length) || 300), 1800);
+
+      if (!resourceVersion && offset !== undefined && offset !== null) {
+        const meta = await logosRequest(
+          `/api/app/books/${encodeURIComponent(resourceId)}/offsets/${encodeURIComponent(String(offset))}?preview=false`
+        ).catch(() => null);
+        resourceVersion = meta?.data?.resourceVersion || null;
+      }
+
+      const reflyUrl = buildReflyUrl({ resourceId, resourceVersion, offset });
+      const textRangeUrl = buildTextRangeUrl({ resourceId, resourceVersion, offset, length });
+
+      if (!resourceVersion || offset === undefined || offset === null) {
+        return {
+          resourceId,
+          resourceVersion,
+          offset: offset ?? null,
+          length,
+          formatName: resolvedFormat,
+          plainText: `${resourceId}`,
+          html: null,
+          reflyUrl,
+          textRangeUrl,
+          markdownFootnote: `[${resourceId}](${textRangeUrl}).`,
+        };
+      }
+
+      const textRange = {
+        resource: { id: resourceId, version: resourceVersion },
+        indexedOffset: offset,
+        indexedLength: length,
+      };
+      const { data } = await logosRequest('/api/app/resources/citation/render', {
+        method: 'POST',
+        body: {
+          citation: { textRange, resource: null },
+          formatName: resolvedFormat,
+        },
+      });
+
+      const parts = parseCitationParts({
+        html: data?.html || '',
+        plainText: data?.plainText || '',
+        textRangeUrl,
+      });
+
+      return {
+        resourceId,
+        resourceVersion,
+        offset,
+        length,
+        formatName: resolvedFormat,
+        plainText: data?.plainText || '',
+        html: data?.html || '',
+        reflyUrl,
+        textRangeUrl,
+        ...parts,
+      };
+    })
+  );
+
+  return { formatName: resolvedFormat, count: rendered.length, citations: rendered };
+}
+
+/**
+ * Scores a candidate search hit by query coverage, rank, and resourceType preference.
+ */
+function scoreCandidate(candidate, preferredResourceTypes = []) {
+  let score = candidate.baseScore;
+  // Boost hits corroborated by multiple search angles
+  score += (candidate.matchedQueries.size - 1) * 0.45;
+  if (candidate.resourceType && preferredResourceTypes.length > 0) {
+    const rt = candidate.resourceType.toLowerCase();
+    if (preferredResourceTypes.some((p) => rt.includes(p.toLowerCase()))) {
+      score += 0.6;
+    }
+  }
+  return score;
+}
+
+/**
+ * Executes the 4-step Logos theological research workflow:
+ * 1) Multi-angle search, 2) Resource evaluation & diversification,
+ * 3) Context extraction + official Logos citation rendering,
+ * 4) Packaged evidence + ready-to-use inline/footnote Markdown references.
+ */
+export async function researchTopic({
+  question,
+  queries = [],
+  preferredResourceTypes = [],
+  resourceIds = [],
+  mode = 'precise',
+  scope = 'books',
+  userLanguage = 'es-ES',
+  maxSources = 8,
+  contextCharsPerSource = 1600,
+  citationFormat,
+} = {}) {
+  const effectiveQueries = (queries.length > 0 ? queries : [question])
+    .map((q) => (q || '').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+
+  if (effectiveQueries.length === 0) {
+    throw new Error('Debes proporcionar "question" o al menos una consulta en "queries".');
+  }
+
+  const perQueryLimit = Math.min(25, Math.max(10, maxSources * 2));
+  const [resolvedFormat, ...searchRuns] = await Promise.all([
+    resolveCitationFormat(citationFormat),
+    ...effectiveQueries.map((q) =>
+      searchLibrary({
+        query: q,
+        mode,
+        scope,
+        resourceIds,
+        userLanguage,
+        includeUnlicensedResources: false,
+        limit: perQueryLimit,
+      }).then((res) => ({ query: q, res }))
+    ),
+  ]);
+
+  // Deduplicate passages by resourceId + offset while tracking cross-query matches
+  const candidateMap = new Map();
+  for (const run of searchRuns) {
+    run.res.results.forEach((hit, idx) => {
+      const key = `${hit.resourceId}::${hit.offset ?? hit.articleId ?? idx}`;
+      const rankScore = 1 / (idx + 1);
+      if (!candidateMap.has(key)) {
+        candidateMap.set(key, {
+          ...hit,
+          matchedQueries: new Set([run.query]),
+          baseScore: rankScore,
+        });
+      } else {
+        const prev = candidateMap.get(key);
+        prev.matchedQueries.add(run.query);
+        prev.baseScore = Math.max(prev.baseScore, rankScore);
+      }
+    });
+  }
+
+  // Enrich candidates with resourceType when preference filtering is active
+  const candidates = Array.from(candidateMap.values());
+  if (candidates.length > 0) {
+    const uniqueIds = [...new Set(candidates.map((c) => c.resourceId))];
+    const recRes = await logosRequest('/api/app/library/records', {
+      method: 'POST',
+      body: {
+        resources: uniqueIds.map((id) => ({ resourceId: id })),
+        fields: ['resourceId', 'resourceType', 'title', 'abbreviatedTitle'],
+        includeUnlicensed: false,
+      },
+    }).catch(() => null);
+
+    const typeById = new Map();
+    for (const rec of recRes?.data?.resources || recRes?.data?.items || []) {
+      if (rec?.resourceId) typeById.set(rec.resourceId, rec.resourceType || null);
+    }
+    for (const c of candidates) {
+      c.resourceType = typeById.get(c.resourceId) || null;
+      c.evalScore = scoreCandidate(c, preferredResourceTypes);
+    }
+  }
+
+  candidates.sort((a, b) => (b.evalScore || 0) - (a.evalScore || 0));
+
+  // Select diverse passages (at most 2 passages per book initially; backfill if needed)
+  const selected = [];
+  const perBookCount = new Map();
+  const maxPerBook = maxSources >= 6 ? 2 : 1;
+
+  for (const c of candidates) {
+    if (selected.length >= maxSources) break;
+    const count = perBookCount.get(c.resourceId) || 0;
+    if (count < maxPerBook) {
+      selected.push(c);
+      perBookCount.set(c.resourceId, count + 1);
+    }
+  }
+  if (selected.length < maxSources) {
+    const picked = new Set(selected);
+    for (const c of candidates) {
+      if (selected.length >= maxSources) break;
+      if (!picked.has(c)) selected.push(c);
+    }
+  }
+
+  // Collect expanded context + official Logos citations in parallel for all selected passages
+  const [contexts, citationsBatch] = await Promise.all([
+    Promise.all(
+      selected.map((hit) =>
+        readResource({
+          resourceId: hit.resourceId,
+          offset: hit.offset ?? undefined,
+          articleId: hit.offset === null || hit.offset === undefined ? hit.articleId : undefined,
+          contextChars: contextCharsPerSource,
+          maxChars: Math.max(contextCharsPerSource * 2, 4000),
+          linkBibleRefs: true,
+        }).catch(() => null)
+      )
+    ),
+    selected.length > 0
+      ? renderCitationsBatch({
+          items: selected.map((hit) => ({
+            resourceId: hit.resourceId,
+            resourceVersion: hit.resourceVersion,
+            offset: hit.offset,
+            length: hit.length || 300,
+          })),
+          formatName: resolvedFormat,
+        }).catch(() => ({ citations: [] }))
+      : Promise.resolve({ citations: [] }),
+  ]);
+
+  // Assign footnote numbers grouped by distinct resource (like Logos [6] citing pp. 299, 302, 442)
+  const footnoteByResource = new Map();
+  const bibliographyGroups = [];
+
+  const sources = selected.map((hit, i) => {
+    const cit = citationsBatch.citations?.[i];
+    const ctx = contexts[i];
+    let footnoteNumber = footnoteByResource.get(hit.resourceId);
+
+    if (!footnoteNumber) {
+      footnoteNumber = bibliographyGroups.length + 1;
+      footnoteByResource.set(hit.resourceId, footnoteNumber);
+      bibliographyGroups.push({
+        footnoteNumber,
+        resourceId: hit.resourceId,
+        baseBody: cit?.baseBody || `${hit.resourceTitle}`,
+        locatorSeparator: cit?.locatorSeparator || ', ',
+        locators: [],
+      });
+    }
+
+    const group = bibliographyGroups[footnoteNumber - 1];
+    const locLabel = cit?.locator || hit.displayReference || `off.${hit.offset ?? 0}`;
+    const locUrl = cit?.locatorUrl || hit.textRangeUrl;
+    if (!group.locators.some((l) => l.label === locLabel && l.url === locUrl)) {
+      group.locators.push({ label: locLabel, url: locUrl });
+    }
+
+    const reflyUrl = cit?.reflyUrl || hit.reflyUrl;
+    return {
+      footnoteNumber,
+      inlineCitationMarkdown: `[\\[${footnoteNumber}\\]](${reflyUrl})`,
+      resourceId: hit.resourceId,
+      resourceTitle: hit.resourceTitle,
+      resourceType: hit.resourceType || null,
+      resourceAuthors: hit.resourceAuthors || [],
+      articleId: hit.articleId,
+      articleTitle: hit.articleTitle,
+      displayReference: hit.displayReference,
+      matchedQueries: Array.from(hit.matchedQueries),
+      snippet: hit.snippet,
+      expandedContext: ctx?.text || hit.snippet,
+      plainCitation: cit?.plainText || hit.resourceTitle,
+      reflyUrl,
+      textRangeUrl: locUrl,
+      previousArticleId: ctx?.previousArticleId || null,
+      nextArticleId: ctx?.nextArticleId || null,
+    };
+  });
+
+  const bibliographyEntries = bibliographyGroups.map((g) => {
+    const locLinks = g.locators.map((l) => `[${l.label}](${l.url})`).join(', ');
+    return `[${g.footnoteNumber}] ${g.baseBody}${locLinks ? `${g.locatorSeparator}${locLinks}` : ''}.`;
+  });
+
+  return {
+    question: question || effectiveQueries[0],
+    queriesExecuted: effectiveQueries,
+    mode: scope === 'bible' ? 'bible' : mode,
+    aiCreditsConsumed: scope !== 'bible' && mode === 'smart',
+    citationFormat: resolvedFormat,
+    evaluatedResourceCount: new Set(candidates.map((c) => c.resourceId)).size,
+    selectedPassageCount: sources.length,
+    sources,
+    bibliographyMarkdown: bibliographyEntries.join('\n'),
+    formattingInstructions:
+      'Redacta la respuesta en español combinando síntesis analítica y evidencia citada con ejemplos concretos. ' +
+      'Usa exactamente "inlineCitationMarkdown" (ej. [\\[1\\]](https://ref.ly/...)) al final de las afirmaciones respaldadas por cada fuente, ' +
+      'conserva los enlaces bíblicos Markdown de "expandedContext" (ej. [Mateo 18](https://app.logos.com/references/bible.61.18)), ' +
+      'y añade al final la bibliografía numerada usando exactamente "bibliographyMarkdown".',
   };
 }

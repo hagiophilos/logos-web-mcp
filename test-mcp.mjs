@@ -33,17 +33,23 @@ async function main() {
   await client.connect(transport);
 
   try {
-    // 2. Verify registered tools
+    // 2. Verify registered tools and prompts
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
       'logos_list_books',
       'logos_read_resource',
+      'logos_render_citations',
+      'logos_research_topic',
       'logos_search_library',
       'logos_status',
       'logos_sync_session',
     ]);
     console.log('[PASS] listTools:', names.join(', '));
+
+    const { prompts } = await client.listPrompts();
+    assert.ok(prompts.some((p) => p.name === 'logos_investigar'));
+    console.log('[PASS] listPrompts:', prompts.map((p) => p.name).join(', '));
 
     // 3. Verify logos_status (account-agnostic)
     const status = parseToolJson(
@@ -114,6 +120,53 @@ async function main() {
     assert.ok(article.text.length > 100, 'El contenido leído debe tener más de 100 caracteres');
     console.log(
       `[PASS] logos_read_resource: resource=${article.resourceId}, chars=${article.totalChars}, article=${article.articleId}`
+    );
+
+    // 7. Verify logos_render_citations
+    const citRes = parseToolJson(
+      await client.callTool({
+        name: 'logos_render_citations',
+        arguments: {
+          items: [
+            {
+              resourceId: firstHit.resourceId,
+              resourceVersion: firstHit.resourceVersion,
+              offset: firstHit.offset,
+              length: firstHit.length || 300,
+            },
+          ],
+        },
+      }),
+      'logos_render_citations'
+    );
+    assert.equal(citRes.citations.length, 1);
+    assert.ok(citRes.citations[0].plainText.length > 5);
+    assert.ok(citRes.citations[0].reflyUrl.startsWith('https://ref.ly/logosres/'));
+    assert.ok(citRes.citations[0].textRangeUrl.includes('/textranges/'));
+    assert.ok(citRes.citations[0].markdownFootnote.includes('textranges'));
+    console.log('[PASS] logos_render_citations:', citRes.citations[0].plainText);
+
+    // 8. Verify 4-step logos_research_topic workflow
+    const research = parseToolJson(
+      await client.callTool({
+        name: 'logos_research_topic',
+        arguments: {
+          question: '¿Qué errores se cometen al interpretar y predicar las parábolas?',
+          queries: ['parables allegory moralizing', 'errores predicar parabolas'],
+          preferredResourceTypes: ['dictionary', 'encyclopedia', 'monograph'],
+          maxSources: 4,
+          contextCharsPerSource: 1000,
+        },
+      }),
+      'logos_research_topic'
+    );
+    assert.equal(research.aiCreditsConsumed, false);
+    assert.ok(research.sources.length >= 2, 'Debe devolver múltiples fuentes evaluadas');
+    assert.ok(research.sources[0].expandedContext.length > 150);
+    assert.match(research.sources[0].inlineCitationMarkdown, /\[\\\[\d+\\\]\]\(https:\/\/ref\.ly\/logosres\//);
+    assert.match(research.bibliographyMarkdown, /^\[1\]\s+/);
+    console.log(
+      `[PASS] logos_research_topic: evaluatedBooks=${research.evaluatedResourceCount}, selected=${research.selectedPassageCount}, format=${research.citationFormat}`
     );
   } finally {
     await client.close();
