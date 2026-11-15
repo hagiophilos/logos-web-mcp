@@ -1,0 +1,20 @@
+{
+  "name": "logos-web-mcp",
+  "version": "1.0.0",
+  "description": "MCP server connecting Gemini (Antigravity) and Claude to your authenticated Logos/Faithlife Web library (app.logos.com)",
+  "type": "module",
+  "main": "src/index.mjs",
+  "bin": {
+    "logos-web-mcp": "./src/index.mjs"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "login": "node src/cli-login.mjs",
+    "status": "node src/cli-login.mjs --status",
+    "test": "node test-mcp.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.8"
+  }
+}

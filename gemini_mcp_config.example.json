@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "logos-web": {
+      "command": "node",
+      "args": [
+        "/ruta/absoluta/a/logos-web-mcp/src/index.mjs"
+      ]
+    }
+  }
+}
